@@ -5033,3 +5033,129 @@ DUK_INTERNAL const char *duk_push_string_tval_readable_error(duk_context *ctx, d
 	DUK_ASSERT_CTX_VALID(ctx);
 	return duk__push_string_tval_readable(ctx, tv, 1 /*error_aware*/);
 }
+
+/*
+ *  Inspection
+ */
+
+/* Raw helper to extract internal information / statistics about a value.
+ * The return value is an object with properties that are version specific.
+ * The properties must not expose anything that would lead to security
+ * issues (e.g. exposing compiled function 'data' buffer might be an issue).
+ * Currently only counts and sizes and such are given so there shouldn't
+ * be security implications.
+ */
+DUK_LOCAL void duk__inspect_string_uint(duk_context *ctx, const char *key, duk_uint_t val) {
+	/* FIXME: duk_put_prop_string_uint_top? */
+	(void) duk_put_prop_string_uint(ctx, -1, key, val);
+}
+
+DUK_EXTERNAL void duk_inspect_value(duk_context *ctx, duk_idx_t idx) {
+	duk_hthread *thr = (duk_hthread *) ctx;
+	duk_tval *tv;
+	duk_heaphdr *h;
+	duk_uint_t itag;
+	duk_uint_t variant = 0;
+
+	DUK_UNREF(thr);
+
+	tv = duk_get_tval_or_unused(ctx, idx);
+	itag = (duk_uint_t) DUK_TVAL_GET_TAG(tv);
+	h = (DUK_TVAL_IS_HEAP_ALLOCATED(tv) ? DUK_TVAL_GET_HEAPHDR(tv) : NULL);
+
+	duk_push_bare_object(ctx);
+	duk__inspect_string_uint(ctx, "type", (duk_uint_t) duk_get_type_tval(tv));  /* potentially invalidates 'tv' */
+	duk__inspect_string_uint(ctx, "itag", (duk_uint_t) itag);
+	if (h == NULL) {
+		return;
+	}
+
+	duk_put_prop_string_pointer(ctx, -1, "hptr", (void *) h); /*FIXME:consistency*/
+#ifdef DUK_USE_REFERENCE_COUNTING
+	duk__inspect_string_uint(ctx, "refc", (duk_uint_t) DUK_HEAPHDR_GET_REFCOUNT(h));
+#endif
+
+	/* Heaphdr size and additional allocation size, followed by
+	 * type specific stuff (with varying value count).
+	 */
+	switch ((duk_small_int_t) DUK_HEAPHDR_GET_TYPE(h)) {
+	case DUK_HTYPE_STRING: {
+		duk_hstring *h_str = (duk_hstring *) h;
+		duk__inspect_string_uint(ctx, "hbytes", (duk_uint_t) (sizeof(duk_hstring) + DUK_HSTRING_GET_BYTELEN(h_str) + 1));
+#if defined(DUK_USE_HSTRING_EXTDATA)
+		if (DUK_HSTRING_HAS_EXTDATA(h_str)) {
+			variant = 1;
+		}
+#endif
+		break;
+	}
+	case DUK_HTYPE_OBJECT: {
+		duk_hobject *h_obj = (duk_hobject *) h;
+		duk_small_uint_t hdr_size;
+		duk__inspect_string_uint(ctx, "class", DUK_HOBJECT_GET_CLASS_NUMBER(h_obj));
+
+		/* FIXME: variants here are maybe pointless; class is enough? */
+		if (DUK_HOBJECT_IS_ARRAY(h_obj)) {
+			hdr_size = (duk_small_uint_t) sizeof(duk_harray);
+		} else if (DUK_HOBJECT_IS_COMPFUNC(h_obj)) {
+			hdr_size = (duk_small_uint_t) sizeof(duk_hcompfunc);
+		} else if (DUK_HOBJECT_IS_NATFUNC(h_obj)) {
+			hdr_size = (duk_small_uint_t) sizeof(duk_hnatfunc);
+		} else if (DUK_HOBJECT_IS_THREAD(h_obj)) {
+			hdr_size = (duk_small_uint_t) sizeof(duk_hthread);
+			duk__inspect_string_uint(ctx, "tstate", ((duk_hthread *) h_obj)->state);
+#if defined(DUK_USE_BUFFEROBJECT_SUPPORT)
+		} else if (DUK_HOBJECT_IS_BUFOBJ(h_obj)) {
+			hdr_size = (duk_small_uint_t) sizeof(duk_hbufobj);
+#endif
+		} else {
+			DUK_ASSERT(variant == 0);
+			hdr_size = (duk_small_uint_t) sizeof(duk_hobject);
+		}
+
+		duk__inspect_string_uint(ctx, "hbytes", hdr_size);
+		duk__inspect_string_uint(ctx, "pbytes", (duk_uint_t) DUK_HOBJECT_P_ALLOC_SIZE(h_obj));
+		duk__inspect_string_uint(ctx, "esize", (duk_uint_t) DUK_HOBJECT_GET_ESIZE(h_obj));
+		/* Note: e_next indicates the number of gc-reachable entries
+		 * in the entry part, and also indicates the index where the
+		 * next new property would be inserted.  It does *not* indicate
+		 * the number of non-NULL keys present in the object.  That
+		 * value could be counted separately but requires a pass through
+		 * the key list.
+		 */
+		duk__inspect_string_uint(ctx, "enext", (duk_uint_t) DUK_HOBJECT_GET_ENEXT(h_obj));
+		duk__inspect_string_uint(ctx, "asize", (duk_uint_t) DUK_HOBJECT_GET_ASIZE(h_obj));
+		duk__inspect_string_uint(ctx, "hsize", (duk_uint_t) DUK_HOBJECT_GET_HSIZE(h_obj));
+
+		if (DUK_HOBJECT_IS_COMPFUNC(h_obj)) {
+			duk_hbuffer *h_data = (duk_hbuffer *) DUK_HCOMPFUNC_GET_DATA(thr->heap, (duk_hcompfunc *) h_obj);
+			duk__inspect_string_uint(ctx, "bcbytes", (duk_uint_t) (h_data ? DUK_HBUFFER_GET_SIZE(h_data) : 0));
+		}
+		break;
+	}
+	case DUK_HTYPE_BUFFER: {
+		duk_hbuffer *h_buf = (duk_hbuffer *) h;
+		if (DUK_HBUFFER_HAS_DYNAMIC(h_buf)) {
+			if (DUK_HBUFFER_HAS_EXTERNAL(h_buf)) {
+				variant = 2;  /* buffer variant 2: external */
+				duk__inspect_string_uint(ctx, "hbytes", (duk_uint_t) (sizeof(duk_hbuffer_external)));
+			} else {
+				/* When alloc_size == 0 the second allocation may not
+				 * actually exist.
+				 */
+				variant = 1;  /* buffer variant 1: dynamic */
+				duk__inspect_string_uint(ctx, "hbytes", (duk_uint_t) (sizeof(duk_hbuffer_dynamic)));
+			}
+			duk__inspect_string_uint(ctx, "dbytes", (duk_uint_t) (DUK_HBUFFER_GET_SIZE(h_buf)));
+		} else {
+			DUK_ASSERT(variant == 0);  /* buffer variant 0: fixed */
+			duk__inspect_string_uint(ctx, "hbytes", (duk_uint_t) (sizeof(duk_hbuffer_fixed) + DUK_HBUFFER_GET_SIZE(h_buf)));
+		}
+		break;
+
+	}
+	}
+
+	/* Shared property for indicating internal struct variants. */
+	duk__inspect_string_uint(ctx, "variant", variant);
+}
