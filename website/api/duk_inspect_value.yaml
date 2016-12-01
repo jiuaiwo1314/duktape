@@ -1,0 +1,39 @@
+name: duk_inspect_value
+
+proto: |
+  void duk_inspect_value(duk_context *ctx, duk_idx_t idx);
+
+stack: |
+  [ ... val! ... ] -> [ ... val! ... info! ]
+
+summary: |
+  <p>Inspect value at <code>idx</code> and push an object containing Duktape
+  specific information about the object.  Equivalent to <code>Duktape.info()</code>
+  in Ecmascript code.  The keys in the result object are not under versioning
+  guarantees and may change even in minor releases (but not in patch releases).
+  If the value stack index is invalid, still returns an info object describing
+  a "none" value.</p>
+
+  <p>The purpose of this primitive is to allow applications to gain access to
+  internal fields related to an argument value.  Using an object result is
+  flexible and versioning friendly, and avoids the need for a lot of individual
+  bindings to inspect individual internal fields related to a value.</p>
+
+  <p>The result object is not under versioning guarantees as a practical
+  compromise: internals change quite frequently, so the choices are either to
+  make no versioning guarantees or avoid exposing internals that may provide
+  blockers to versioning.  As such, calling code should never rely on having
+  a certain set of fields available, and it may be necessary to check
+  <code>DUK_VERSION</code> when interpreting the result fields.</p>
+
+example: |
+  duk_inspect_value(ctx, -3);
+  duk_get_prop_string(ctx, -1, "refc");
+  printf("refcount: %ld\n", (long) duk_to_int(ctx, -1));
+  duk_pop(ctx);
+
+tags:
+  - stack
+  - inspect
+
+introduced: 2.0.0
