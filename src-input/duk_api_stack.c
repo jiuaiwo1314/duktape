@@ -5029,6 +5029,50 @@ DUK_INTERNAL const char *duk_push_string_tval_readable_error(duk_context *ctx, d
  *  Inspection
  */
 
+DUK_EXTERNAL void duk_push_act(duk_context *ctx, duk_int_t level) {
+	duk_hthread *thr = (duk_hthread *) ctx;
+	duk_activation *act;
+	duk_uint_fast32_t pc;
+	duk_uint_fast32_t line;
+
+	DUK_ASSERT_CTX_VALID(ctx);
+
+	/* -1             = top callstack entry, callstack[callstack_top - 1]
+	 * -callstack_top = bottom callstack entry, callstack[0]
+	 */
+	if (level >= 0 || -level > (duk_int_t) thr->callstack_top) {
+		duk_push_undefined(ctx);
+		return;
+	}
+	DUK_ASSERT(level >= -((duk_int_t) thr->callstack_top) && level <= -1);
+	act = thr->callstack + thr->callstack_top + level;
+
+	duk_push_bare_object(ctx);
+
+	duk_push_tval(ctx, &act->tv_func);
+	duk_put_prop_stridx(ctx, -2, DUK_STRIDX_LC_FUNCTION);
+
+	/* Relevant PC is just before current one because PC is
+	 * post-incremented.  This should match what error augment
+	 * code does.
+	 */
+	pc = duk_hthread_get_act_prev_pc(thr, act);
+	duk_put_prop_string_uint(ctx, -1, "pc", (duk_uint_t) pc);  /* FIXME: variant for stridx */
+
+#if defined(DUK_USE_PC2LINE)
+	line = duk_hobject_pc2line_query(ctx, -2, pc);
+#else
+	line = 0;
+#endif
+	duk_put_prop_string_uint(ctx, -1, "line", (duk_uint_t) line);  /* FIXME: variant for stridx */
+
+	/* Providing access to e.g. act->lex_env would be dangerous: these
+	 * internal structures must never be accessible to the application.
+	 * Duktape relies on them having consistent data, and this consistency
+	 * is only asserted for, not checked for.
+	 */
+}
+
 /* Raw helper to extract internal information / statistics about a value.
  * The return values are version specific and must not expose anything
  * that would lead to security issues (e.g. exposing compiled function
