@@ -60,7 +60,11 @@
 #define DUK__MAX_TEMPS                    0xffffL
 
 /* Initial bytecode size allocation. */
+#if defined(DUK_USE_PREFER_SIZE)
+#define DUK__BC_INITIAL_INSTS             16
+#else
 #define DUK__BC_INITIAL_INSTS             256
+#endif
 
 #define DUK__RECURSION_INCREASE(comp_ctx,thr)  do { \
 		DUK_DDD(DUK_DDDPRINT("RECURSION INCREASE: %s:%ld", (const char *) DUK_FILE_MACRO, (long) DUK_LINE_MACRO)); \
@@ -833,10 +837,15 @@ DUK_LOCAL void duk__convert_to_func_template(duk_compiler_ctx *comp_ctx, duk_boo
 	DUK_DD(DUK_DDPRINT("keeping _Varmap because debugger support is enabled"));
 	keep_varmap = 1;
 #else
+	/* FIXME: slow path accesses are only an issue if they may match the
+	 * function's -own variables-.  But e.g. accessing 'Math' which won't
+	 * match any static declarations is fine (provieded there are no evals,
+	 * inner functions, etc).
+	 */
 	keep_varmap =
-	    func->id_access_slow ||   /* directly uses slow accesses */
-	    func->may_direct_eval ||  /* may indirectly slow access through a direct eval */
-	    funcs_count > 0;          /* has inner functions which may slow access (XXX: this can be optimized by looking at the inner functions) */
+	    func->id_access_slow_own ||   /* directly uses slow accesses that may match own variables */
+	    func->may_direct_eval ||      /* may indirectly slow access through a direct eval */
+	    funcs_count > 0;              /* has inner functions which may slow access (XXX: this can be optimized by looking at the inner functions) */
 #endif
 
 	if (keep_varmap) {
@@ -2430,7 +2439,7 @@ DUK_LOCAL duk_reg_t duk__lookup_active_register_binding(duk_compiler_ctx *comp_c
 
 	if (comp_ctx->curr_func.with_depth > 0) {
 		DUK_DDD(DUK_DDDPRINT("identifier lookup inside a 'with' -> fall back to slow path"));
-		goto slow_path;
+		goto slow_path_own;
 	}
 
 	/*
@@ -2446,17 +2455,30 @@ DUK_LOCAL duk_reg_t duk__lookup_active_register_binding(duk_compiler_ctx *comp_c
 		ret = duk_to_int(ctx, -1);
 		duk_pop(ctx);
 	} else {
+		/* FIXME: must detect if there are any try-catches. */
+
+		/* In this case we're doing a variable lookup that doesn't
+		 * match our own variables, so _Varmap won't be needed at
+		 * run time.
+		 */
 		duk_pop(ctx);
-		goto slow_path;
+		goto slow_path_notown;
 	}
 
 	DUK_DDD(DUK_DDDPRINT("identifier lookup -> reg %ld", (long) ret));
 	return ret;
 
- slow_path:
-	DUK_DDD(DUK_DDDPRINT("identifier lookup -> slow path"));
+ slow_path_notown:
+	DUK_DDD(DUK_DDDPRINT("identifier lookup -> slow path, not own variable"));
 
 	comp_ctx->curr_func.id_access_slow = 1;
+	return (duk_reg_t) -1;
+
+ slow_path_own:
+	DUK_DDD(DUK_DDDPRINT("identifier lookup -> slow path, may be own variable"));
+
+	comp_ctx->curr_func.id_access_slow = 1;
+	comp_ctx->curr_func.id_access_slow_own = 1;
 	return (duk_reg_t) -1;
 }
 
@@ -7166,6 +7188,7 @@ DUK_LOCAL void duk__parse_func_body(duk_compiler_ctx *comp_ctx, duk_bool_t expec
 	func->may_direct_eval = 0;
 	func->id_access_arguments = 0;
 	func->id_access_slow = 0;
+	func->id_access_slow_own = 0;
 	func->reg_stmt_value = reg_stmt_value;
 #if defined(DUK_USE_DEBUGGER_SUPPORT)
 	func->min_line = DUK_INT_MAX;
@@ -7255,6 +7278,7 @@ DUK_LOCAL void duk__parse_func_body(duk_compiler_ctx *comp_ctx, duk_bool_t expec
 		/* XXX: init or assert catch depth etc -- all values */
 		func->id_access_arguments = 0;
 		func->id_access_slow = 0;
+		func->id_access_slow_own = 0;
 
 		/*
 		 *  Check function name validity now that we know strictness.
